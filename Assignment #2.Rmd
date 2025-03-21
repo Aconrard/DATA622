@@ -1,0 +1,560 @@
+---
+title: 'Assignment 2: Experimentation & Model Training'
+author: "Anthony Conrardy"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(ROSE)
+library(pROC)
+library(DMwR2)
+library(randomForest)
+library(smotefamily)
+library(ada)
+
+# Import Dataset
+df <- read.csv("https://raw.githubusercontent.com/Aconrard/DATA622/refs/heads/main/bank-full.csv", sep = ";")
+```
+
+## Assignment
+
+This assignment consists of conducting at least two (2) experiments for different algorithms: Decision Trees, Random Forest and Adaboost. That is, at least six (6) experiments in total (3 algorithms x 2 experiments each). For each experiment you will define what you are trying to achieve (before each run), conduct the experiment, and at the end you will review how your experiment went. These experiments will allow you to compare algorithms and choose the optimal model.
+
+### Decision Tree - Experiment 1
+
+**Objective: **
+
+**Create a baseline decision tree model focusing on handling the class imbalance issue identified in the EDA (11.7% yes vs 88.3% no) while using key predictive features identified in the EDA (education, marital status, housing loan, contact method, and duration).**
+
+***Data Preparation***
+
+**This section performs data preparation in three ways: First, it properly formats categorical variables (like job type and marital status) so they can be used correctly in our analysis. Next, it creates a new useful variable that simply indicates whether a customer was previously contacted or not. Finally, it creates a streamlined version of our dataset by keeping only the most important variables we want to analyze, removing any unnecessary information that might not help predict whether someone will subscribe to a term deposit.***
+
+
+```{r data preparation, echo=FALSE}
+# Categorical to Factors
+categorical_vars <- c('job', 'marital', 'education', 'default', 'housing', 
+                     'loan', 'contact', 'month', 'poutcome', 'y')
+df[categorical_vars] <- lapply(df[categorical_vars], as.factor)
+
+# Feature Engineering
+df$previously_contacted <- ifelse(df$pdays == -1, "no", "yes")
+df$previously_contacted <- as.factor(df$previously_contacted)
+
+# Select the Features
+features <- c('education', 'marital', 'housing', 'contact', 
+                      'duration', 'month', 'age', 'balance', 'campaign',
+                      'pdays', 'previously_contacted', 'poutcome')
+# Dataset for Analysis
+model1_data <- df[, c(features, 'y')]
+
+print(head(model1_data, 10))
+```
+
+***Train-Test Split***
+
+***This section splits our data and builds our first prediction model. It starts by dividing our dataset into two parts - 70% for training and 30% for testing - while ensuring we can reproduce the same split every time. Because we have many more customers who said "no" to term deposits than those who said "yes", we use ROSE (Random Over-Sampling Examples) to create an artificial but balanced training dataset with equal numbers of "yes" and "no" responses. This helps prevent our model from being biased toward predicting "no" all the time. Finally, it creates a decision tree model using this balanced data, with specific rules about how detailed the tree can become (like how many splits it can make and how many customers need to be in each group).***
+
+```{r train-test, echo=FALSE}
+set.seed(2176)
+train_index <- createDataPartition(model1_data$y, p = 0.7, list = FALSE)
+train_data <- model1_data[train_index, ]
+test_data <- model1_data[-train_index, ]
+
+# Class Imbalance Issue
+balanced_train_ROSE <- ROSE(y ~ ., data = train_data, seed = 2176)$data
+
+# Train the Tree
+dt_model <- rpart(y ~ ., 
+                 data = balanced_train_ROSE,
+                 method = "class",
+                 control = rpart.control(cp = 0.01,
+                                       minbucket = 20,
+                                       maxdepth = 10))
+rpart.plot(dt_model)
+```
+
+***Tree Results***
+
+***This section tests how well our decision tree model performs. First, it uses the model to make predictions on our test data (the 30% we set aside earlier). Then it creates a detailed report comparing these predictions to what actually happened - showing how often we correctly predicted both "yes" and "no" responses. Finally, it calculates the AUC (Area Under the Curve) score, which is like a grade from 0 to 1 that tells us how good our model is at distinguishing between customers likely to say "yes" versus "no" to a term deposit. The higher the AUC score, the better our model is at making these distinctions.***
+
+```{r DT results, echo=FALSE}
+# Run Algorithm
+predictions <- predict(dt_model, test_data, type = "class")
+
+# Evaluate
+conf_matrix <- confusionMatrix(predictions, test_data$y, positive = "yes")
+print(conf_matrix)
+
+# Model Metrics
+roc_obj <- roc(as.numeric(test_data$y) - 1, 
+               as.numeric(predict(dt_model, test_data, type = "prob")[,2]))
+auc_value <- auc(roc_obj)
+print(paste("AUC:", auc_value))
+```
+
+***Conclusion***
+
+***Our decision tree model achieved nearly 80% overall accuracy, with good performance in identifying both positive and negative cases. Looking at the confusion matrix, out of 13,562 predictions, the model correctly identified 9,498 "no" responses and 1,320 "yes" responses. The model was particularly strong at confirming negative cases (97.3% accurate when predicting "no"), but less reliable for positive predictions (only 34.8% accurate when predicting "yes"). The balanced accuracy of 81.3% and AUC score of 0.84 suggest the model performs well overall, despite the challenge of predicting the minority class ("yes" responses, which make up only 11.7% of the data). These results indicate our model is a useful tool for identifying potential customers, though there's room for improvement in reducing false positives.***
+
+
+### Decision Tree - Experiment 2
+
+**Hypothesis (Objective): **
+
+**Altering the ROSE parameters will impact the overall performance of our models.  Instead of the initial attempt at a 50/50 balance, two trials of the minority class at 40% and 60% will be used.**
+
+***Re-Balancing the Training Set***
+
+***This section creates two different versions of our balanced training data to experiment with different class proportions. The first version (balanced_train_rose1) creates a dataset where 40% of responses are "yes" and 60% are "no", while the second version (balanced_train_rose2) does the opposite with 60% "yes" and 40% "no". Then, it builds two separate decision tree models using these differently balanced datasets, keeping all other model settings the same. This allows us to compare how different proportions of "yes" and "no" responses in our training data affect the model's ability to make accurate predictions.***
+
+
+```{r SMOTE ROSE Balance Sets, echo=FALSE}
+set.seed(2176)
+
+# 40% Minority Class
+balanced_train_rose1 <- ROSE(y ~ ., 
+                           data = train_data,
+                           seed = 2176,
+                           p = 0.4,        
+                           N = nrow(train_data))$data
+
+# 60% Minority Class
+balanced_train_rose2 <- ROSE(y ~ ., 
+                           data = train_data,
+                           seed = 2176,
+                           p = 0.6,        
+                           N = nrow(train_data))$data
+dt_model1 <- rpart(y ~ ., 
+                 data = balanced_train_rose1,
+                 method = "class",
+                 control = rpart.control(cp = 0.01,
+                                       minbucket = 20,
+                                       maxdepth = 10))
+dt_model2 <- rpart(y ~ ., 
+                 data = balanced_train_rose2,
+                 method = "class",
+                 control = rpart.control(cp = 0.01,
+                                       minbucket = 20,
+                                       maxdepth = 10))
+```
+
+***Experiment 2 Results***
+
+***This section evaluates and compares our two different decision tree models. First, it creates visual plots of both trees to see how they make decisions. Then, it uses each model to make predictions on our test data and creates detailed performance reports (confusion matrices) showing how well each model identified both "yes" and "no" responses. Finally, it calculates AUC scores for both models, which helps us determine which balancing approach (40% vs 60% "yes" responses) produced better results. This comparison helps us understand whether having more or fewer "yes" responses in our training data leads to better predictions.***
+
+```{r Experiment 2 Results, echo=FALSE, message=FALSE}
+rpart.plot(dt_model1)
+
+print('/n')
+
+rpart.plot(dt_model2)
+
+# Run Algorithm
+pred1 <- predict(dt_model1, test_data, type = "class")
+pred2 <- predict(dt_model2, test_data, type = "class")
+
+# Evaluate
+conf_matrix1 <- confusionMatrix(pred1, test_data$y, positive = "yes")
+print(conf_matrix1)
+
+conf_matrix2 <- confusionMatrix(pred2, test_data$y, positive = "yes")
+print(conf_matrix2)
+
+# Model Metrics
+roc_obj1 <- roc(as.numeric(test_data$y) - 1, 
+               as.numeric(predict(dt_model1, test_data, type = "prob")[,2]))
+auc_value1 <- auc(roc_obj1)
+print(paste("AUC:", auc_value1))
+
+roc_obj2 <- roc(as.numeric(test_data$y) - 1, 
+               as.numeric(predict(dt_model2, test_data, type = "prob")[,2]))
+auc_value2 <- auc(roc_obj2)
+print(paste("AUC:", auc_value2))
+```
+***Conclusion***
+
+***Comparing all three decision tree models:***
+
+Original Model (50/50 balance):
+
+- Accuracy: 79.77%
+- Sensitivity: 83.23%
+- Specificity: 79.31%
+- Positive Predictive Value: 34.76%
+- AUC: 0.839
+
+Model 1 (40% "yes"):
+
+- Accuracy: 83.94%
+- Sensitivity: 76.86%
+- Specificity: 84.88%
+- Positive Predictive Value: 40.23%
+- AUC: 0.827
+
+Model 2 (60% "yes"):
+
+- Accuracy: 79.30%
+- Sensitivity: 85.69%
+- Specificity: 78.45%
+- Positive Predictive Value: 34.49%
+- AUC: 0.861
+
+***Recommendation:***
+
+***The original 50/50 balanced model offers the best compromise between the extremes. While Model 1 (40%) has the highest accuracy and positive predictive value, and Model 2 (60%) has the highest sensitivity and AUC, the original model maintains good performance across all metrics without sacrificing too much in any area. Its AUC of 0.839 is very competitive, and it maintains a good balance between sensitivity and specificity. For the bank's purpose of identifying potential term deposit customers while minimizing false positives, the original 50/50 balanced model appears to be the most practical choice***
+
+
+### Random Forest - Experiment 1
+
+**Objective: **
+
+**Run a Random Forest application on the same data as the decision tree and compare performance metrics against those of the decision tree application and improve results. For this experiment we will be using the re-balanced dataset of 60% "Yes" responses.**
+
+
+***Creating the Random Forest Model***
+
+***This section creates and evaluates a Random Forest model, which is like creating many decision trees and letting them vote on the final prediction. It uses our previously best-performing data balance (60% "yes" responses) and builds 500 different trees. The code then tests this model's performance and compares it to our earlier decision tree results. It calculates the same performance metrics we used before (confusion matrix and AUC score) for fair comparison. Additionally, it analyzes which features (variables) were most important in making predictions by measuring how much each variable helped improve the model's accuracy. This helps us understand not just how well the Random Forest performs, but also which customer characteristics are most useful in predicting who will accept a term deposit.***
+
+```{r random forest, echo=FALSE, message=FALSE}
+# Use the Decision Tree with 60% minority since had highest accuracy
+rf_model <- randomForest(
+    y ~ .,
+    data = balanced_train_rose2,
+    ntree = 500,          
+    mtry = sqrt(ncol(balanced_train_rose2) - 1),  
+    importance = TRUE    
+)
+
+# Run the algorithm for both classification and probability
+pred_rf <- predict(rf_model, test_data)
+prob_rf <- predict(rf_model, test_data, type = "prob")
+
+# Calculate confusion matrix
+conf_matrix_rf <- confusionMatrix(pred_rf, test_data$y, positive = "yes")
+
+# Calculate ROC and AUC
+roc_rf <- roc(response = test_data$y,
+              predictor = prob_rf[,2],
+              levels = c("no", "yes"))
+
+print("Random Forest vs Decision Tree Comparison:")
+print("----------------------------------------")
+
+print("Random Forest Results:")
+print(conf_matrix_rf)
+print(paste("RF AUC:", round(auc(roc_rf), 4)))
+
+comparison_df <- data.frame(
+    Metric = c("AUC"),
+    DecisionTree = auc_value1,
+    RandomForest = auc(roc_rf)
+)
+print("Model Comparison:")
+print(comparison_df)
+
+# Variable Importance Analysis
+print("Top 5 Most Important Variables in Random Forest:")
+importance_df <- importance(rf_model)
+importance_df <- data.frame(
+    Variable = rownames(importance_df),
+    MeanDecreaseGini = importance_df[, "MeanDecreaseGini"]
+)
+importance_df <- importance_df[order(importance_df$MeanDecreaseGini, decreasing = TRUE), ]
+print(head(importance_df, 6), row.names = FALSE)
+```
+***Conclusion***
+
+Comparing Random Forest vs Decision Tree (60% balance):
+
+Random Forest Performance:
+
+- Higher accuracy (82.94% vs 79.30%)
+- Better sensitivity (87.58% vs 85.69%)
+- Better specificity (82.32% vs 78.45%)
+- Better positive predictive value (39.62% vs 34.49%)
+- Significantly higher AUC (0.917 vs 0.861)
+
+The Random Forest outperforms the Decision Tree across all metrics
+
+Most important predictive features (in order):
+
+- Call duration
+- Month of contact
+- Days since previous contact
+- Customer age
+- Number of campaign contacts
+- Account balance
+
+***Recommendation***
+
+***The Random Forest model is clearly superior for this task. It shows better discrimination between likely subscribers and non-subscribers (higher AUC), makes fewer false predictions (higher accuracy), and is better at identifying potential customers (higher sensitivity and positive predictive value). The model also provides valuable insights about which factors matter most in predicting success, with call duration being by far the most important predictor.***
+
+
+### Random Forest - Experiment 2
+
+**Objective: **
+
+**Attempt to improve the false positives by adjusting the parameters of the Random Forest application.  The number of variables selected for the tree will be reduced to p/3 and we will try to make sure all classes are properly represented.**
+
+
+***Re-balance, Re-structure and Compare***
+
+***This section creates a second Random Forest model with modified settings to see if we can improve our results. The key differences from our first Random Forest include using a different number of variables at each split (mtry parameter) and ensuring equal sample sizes for both "yes" and "no" classes (sampsize parameter). Like before, it evaluates the model's performance using confusion matrices and AUC scores, but now directly compares metrics between both Random Forest experiments side by side. It also analyzes which variables are most important in this new model to see if different settings change which customer characteristics matter most. This comparison helps us understand whether these parameter adjustments improved our predictions and if they changed which features are most useful for identifying potential customers.***
+
+```{r random forest 2, echo=FALSE}
+rf_model2 <- randomForest(
+    y ~ .,
+    data = balanced_train_rose2,  
+    ntree = 500,          
+    mtry = ncol(balanced_train_rose2)/3,
+    importance = TRUE,
+    sampsize = rep(min(table(balanced_train_rose2$y)), 2)
+)
+
+# Model Evaluation
+pred_rf2 <- predict(rf_model2, test_data)
+prob_rf2 <- predict(rf_model2, test_data, type = "prob")
+
+# Calculate confusion matrix
+conf_matrix_rf2 <- confusionMatrix(pred_rf2, test_data$y, positive = "yes")
+
+# Calculate ROC and AUC
+roc_rf2 <- roc(response = test_data$y,
+               predictor = prob_rf2[,2],
+               levels = c("no", "yes"))
+
+# Print Results
+print("Random Forest Experiment 2 Results:")
+print(conf_matrix_rf2)
+print(paste("RF2 AUC:", round(auc(roc_rf2), 4)))
+
+# Compare both experiments
+comparison_df <- data.frame(
+    Metric = c("Accuracy", "Sensitivity", "Specificity", "Pos Pred Value", "AUC"),
+    RF_Experiment1 = c(0.8292, 0.8764, 0.8230, 0.3960, auc(roc_rf)),
+    RF_Experiment2 = c(
+        conf_matrix_rf2$overall["Accuracy"],
+        conf_matrix_rf2$byClass["Sensitivity"],
+        conf_matrix_rf2$byClass["Specificity"],
+        conf_matrix_rf2$byClass["Pos Pred Value"],
+        auc(roc_rf2)
+    )
+)
+print("\nComparison of Experiments:")
+print(comparison_df, row.names = FALSE)
+
+# Variable Importance Analysis for Experiment 2
+print("\nTop 5 Most Important Variables in Random Forest (Experiment 2):")
+importance_df2 <- importance(rf_model2)
+importance_df2 <- data.frame(
+    Variable = rownames(importance_df2),
+    MeanDecreaseGini = importance_df2[, "MeanDecreaseGini"]
+)
+importance_df2 <- importance_df2[order(importance_df2$MeanDecreaseGini, decreasing = TRUE), ]
+print(head(importance_df2, 6))
+```
+
+***Conclusion***
+RF Experiment 1:
+
+- Accuracy: 82.92%
+- Higher sensitivity (87.64%)
+- Lower specificity (82.30%)
+- Lower positive predictive value (39.60%)
+- AUC: 0.916
+
+RF Experiment 2:
+
+- Higher accuracy (84.52%)
+- Lower sensitivity (84.30%)
+- Higher specificity (84.54%)
+- Better positive predictive value (41.94%)
+- Slightly higher AUC (0.917)
+
+Important Variables (consistent in both models):
+
+- Call duration
+- Month of contact
+- Days since previous contact
+- Age
+- Number of campaign contacts
+- Balance
+
+
+***Recommendation***
+
+***While both Random Forest models significantly outperform the Decision Tree approaches, RF Experiment 2 is the superior choice for the bank's needs. It offers:***
+
+- ***Better overall accuracy***
+- ***More balanced performance between sensitivity and specificity***
+- ***Higher positive predictive value (more reliable "yes" predictions)***
+- ***Slightly better AUC***
+
+
+### AdaBoost - Experiment 1
+
+**Objective: **
+
+**Using the established balanced dataset created from the decision tree, and improved upon with the random forest experiments, use AdaBoost algorithm to compare results and identify parameter changes for subsequent experiment.**
+
+***Create and Run the Model***
+
+***This section creates an AdaBoost model, which is another ensemble learning method that builds upon weak learners (typically simple decision trees) by focusing on correcting mistakes from previous predictions. It uses the same balanced dataset (60% "yes" responses) that worked best in our previous models, but with 50 iterations and a learning rate of 0.1. Like our previous analyses, it evaluates the model's performance using confusion matrices and compares the results directly with our Decision Tree and Random Forest models. It also examines which variables are most important in making predictions. The key difference is that AdaBoost assigns different weights to training examples based on how difficult they are to classify correctly, potentially offering a different perspective on which customer characteristics best predict term deposit acceptance.***
+
+```{r AdaBoost, echo=FALSE}
+# Create the model
+ada_model1 <- ada(y ~ .,
+                 data = balanced_train_rose2,
+                 iter = 50,        # moderate number of iterations
+                 nu = 0.1,        # learning rate
+                 type = "discrete" # discrete AdaBoost
+)
+
+# Run the algorithm
+pred_ada <- predict(ada_model1, test_data)
+
+# Evaluate the model
+conf_matrix_ada <- confusionMatrix(pred_ada, test_data$y, positive = "yes")
+
+# Print Results
+print("AdaBoost Experiment 1 Results:")
+print(conf_matrix_ada)
+
+# Variable Importance for AdaBoost
+print("Variable Importance in AdaBoost:")
+print(varplot(ada_model1, max.var.show = 5))
+
+# Compare with previous models
+comparison_df <- data.frame(
+    Metric = c("Accuracy", "Sensitivity", "Specificity", "Pos Pred Value"),
+    DecisionTree = c(0.8394, 0.7686, 0.8488, 0.4023),
+    RandomForest = c(0.8451, 0.8430, 0.8454, 0.4194),
+    AdaBoost = c(
+        conf_matrix_ada$overall["Accuracy"],
+        conf_matrix_ada$byClass["Sensitivity"],
+        conf_matrix_ada$byClass["Specificity"],
+        conf_matrix_ada$byClass["Pos Pred Value"]
+    )
+)
+print("Comparison across all models:")
+print(comparison_df, row.names = FALSE)
+```
+
+***Conclusion***
+Decision Tree (60% balance):
+
+- Accuracy: 83.94%
+- Sensitivity: 76.86%
+- Specificity: 84.88%
+- Positive Predictive Value: 40.23%
+
+Random Forest:
+
+- Highest accuracy (84.51%)
+- Good balance of sensitivity (84.30%) and specificity (84.54%)
+- Best positive predictive value (41.94%)
+
+AdaBoost:
+
+- Lowest accuracy (81.66%)
+- Highest sensitivity (86.89%)
+- Lowest specificity (80.97%)
+- Lowest positive predictive value (37.68%)
+
+***Recommendation***
+
+***While AdaBoost shows the highest sensitivity (best at finding potential customers), its lower positive predictive value means more false positives, which would waste resources on unsuccessful contacts. The Decision Tree, while solid, is outperformed by Random Forest across all metrics. The Random Forest model would provide the most efficient and reliable tool for identifying potential term deposit customers while minimizing wasted contact attempts.***
+
+### AdaBoost - Experiment 2
+
+**Objective:**
+
+**Determine whether the appropriate learning rate and iterations are sufficient to observe optimal performance. Increase the parameter for iterations and decrease the learning rate to compare effectiveness over the initial attempt.**
+
+***Re-set, Re-Run and Compare***
+
+***This code section focuses on refining and comparing different versions of the AdaBoost model through visualization and parameter tuning. It begins by creating a visual representation of our initial model's performance, then develops two new variations with more sophisticated parameters: both using 200 iterations (up from 50), a more conservative learning rate of 0.05 (down from 0.1), and a maximum tree depth of 4. The key distinction between these new models is their prediction type - one uses "real" AdaBoost for continuous predictions, while the other uses "discrete" AdaBoost for binary outcomes. The code concludes by generating performance plots for both new models, allowing us to visually compare how these different configurations and prediction types affect the model's learning process and overall effectiveness in predicting term deposit acceptance.***
+
+```{r adaboost 2, echo=FALSE}
+
+plot(ada_model1, TRUE, TRUE)
+
+# Alter the parameters and try using real rather than discrete for AdaBoost. Increase iterations and decrease learning rate.
+
+ada_model2a <- ada(y ~ .,
+                 data = balanced_train_rose2,
+                 iter = 200,      
+                 nu = 0.05,       
+                 type = "real",   
+                 control = rpart.control(maxdepth = 4))
+
+# Experiment 2B: Discrete AdaBoost
+ada_model2b <- ada(y ~ .,
+                 data = balanced_train_rose2,
+                 iter = 200,      
+                 nu = 0.05,       
+                 type = "discrete",   
+                 control = rpart.control(maxdepth = 4))
+
+# Review the plots
+plot(ada_model2a, TRUE, TRUE)
+plot(ada_model2b, TRUE, TRUE)
+
+```
+
+
+
+***The visualization presents a compelling analysis of the AdaBoost model's performance across 200 iterations through two complementary metrics. The Training Error plot (shown in red) demonstrates a consistent decline from approximately 0.19 to 0.14, with the most significant improvement occurring within the first 50 iterations, followed by increasingly modest gains that eventually plateau. Alongside this, the Training Kappa plot (shown in green) illustrates an improvement in model agreement from 0.58 to 0.70, showing rapid initial gains followed by continued gradual improvement throughout the iterations. While the error rate stabilizes in later iterations, the Kappa score continues to show slight improvement, suggesting potential for further optimization. These patterns strongly suggest that an optimal model configuration would likely use between 50-100 iterations, as this range captures the most substantial improvements while minimizing the risk of overfitting. The smooth progression of both metrics validates the effectiveness of the chosen learning rate (0.05), as evidenced by the absence of erratic fluctuations in either measure.***
+
+
+
+***Compare the Models***
+
+***This code section evaluates and compares the performance of our different AdaBoost implementations through a comprehensive analysis framework. It begins by using both the real and discrete AdaBoost models to make predictions on our test data, then generates detailed confusion matrices to assess their performance. The code creates a comparison dataframe that places all three AdaBoost variations (our original model and the two new versions) side by side, examining key metrics including accuracy, sensitivity, specificity, and positive predictive value. This structured comparison allows us to directly assess which version of AdaBoost performs best for our bank marketing prediction task. It should be noted, based upon our previous plots, that 50-60 iterations with a learning rate of 0.05 might be optimal to prevent overfitting, indicating that more iterations may not necessarily lead to better results.***
+
+```{r adaboost 2a, echo=FALSE}
+# Evaluate both models
+pred_ada2a <- predict(ada_model2a, test_data)
+pred_ada2b <- predict(ada_model2b, test_data)
+
+conf_matrix_ada2a <- confusionMatrix(pred_ada2a, test_data$y, positive = "yes")
+conf_matrix_ada2b <- confusionMatrix(pred_ada2b, test_data$y, positive = "yes")
+
+# Compare results
+comparison_df_2 <- data.frame(
+    Metric = c("Accuracy", "Sensitivity", "Specificity", "Pos Pred Value"),
+    AdaBoost_Exp1 = c(0.8205, 0.8632, 0.8149, 0.3818),
+    Real_AdaBoost = c(
+        conf_matrix_ada2a$overall["Accuracy"],
+        conf_matrix_ada2a$byClass["Sensitivity"],
+        conf_matrix_ada2a$byClass["Specificity"],
+        conf_matrix_ada2a$byClass["Pos Pred Value"]
+    ),
+    Discrete_AdaBoost = c(
+        conf_matrix_ada2b$overall["Accuracy"],
+        conf_matrix_ada2b$byClass["Sensitivity"],
+        conf_matrix_ada2b$byClass["Specificity"],
+        conf_matrix_ada2b$byClass["Pos Pred Value"]
+    )
+)
+print("Comparison of AdaBoost types:")
+print(comparison_df_2, row.names=FALSE)
+```
+
+***Conclusion***
+
+***Comparing the three AdaBoost implementations reveals interesting performance differences. The Real AdaBoost model demonstrates the strongest overall performance with the highest accuracy (82.76%), solid sensitivity (85.81%), best specificity (82.36%), and highest positive predictive value (39.18%). The Discrete AdaBoost follows with slightly lower but still competitive metrics (82.24% accuracy, 86.07% sensitivity, 81.73% specificity, 38.42% positive predictive value), while the original AdaBoost experiment shows the lowest overall performance across most metrics (82.05% accuracy, though with the highest sensitivity at 86.32%).***
+
+
+***Recommendation***
+
+***After analyzing both the performance metrics and training plots, implementing the Real AdaBoost model with carefully tuned specifications for optimal performance seems the best option. The model should employ Real (continuous) AdaBoost processing with 100 iterations, striking an balance between capturing performance benefits while avoiding overfitting risks. The learning rate should be maintained at 0.05, as this setting has proven effective in the current implementation, and the maximum depth should remain at 4, which provides an optimal balance in the decision tree structure. This particular configuration has demonstrated superior performance by achieving the best balance of accuracy and predictive value while maintaining robust sensitivity and specificity scores. The visual representation of the training error and Kappa scores supports this recommendation, showing error reduction plateauing after 50-100 iterations while the Kappa score continues to show gradual improvement. This makes it the most effective tool for the bank's specific need of identifying potential term deposit customers while minimizing false positives that could waste valuable resources.***
